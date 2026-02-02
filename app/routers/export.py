@@ -1,0 +1,287 @@
+"""
+Export Router - Handles content export to PDF and TXT.
+
+This router provides endpoints for:
+1. Exporting content to PDF
+2. Exporting content to TXT
+"""
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Literal
+from io import BytesIO
+
+from app.database import get_db
+from app.dependencies import get_current_user
+from app.models import User
+from app.utils.logger import logger
+from pydantic import BaseModel, Field
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
+from datetime import datetime
+
+
+# ============================================================
+# SCHEMAS
+# ============================================================
+
+class ExportRequest(BaseModel):
+    """Request schema for content export."""
+    title: str = Field(..., description="Document title")
+    content: str = Field(..., description="Content to export")
+    content_type: Literal["summary", "translation", "quiz"] = Field(
+        ..., 
+        description="Type of content being exported"
+    )
+    source_url: str = Field(None, description="Original source URL (optional)")
+
+
+# ============================================================
+# ROUTER SETUP
+# ============================================================
+
+router = APIRouter()
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def create_pdf(title: str, content: str, content_type: str, source_url: str = None) -> BytesIO:
+    """
+    Create a PDF document from the provided content.
+    
+    Args:
+        title: Document title
+        content: Main content
+        content_type: Type of content (summary, translation, quiz)
+        source_url: Optional source URL
+    
+    Returns:
+        BytesIO buffer containing the PDF
+    """
+    buffer = BytesIO()
+    
+    # Create PDF document
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=72,
+        leftMargin=72,
+        topMargin=72,
+        bottomMargin=72
+    )
+    
+    # Get styles
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        spaceAfter=20
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'CustomSubtitle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor='gray',
+        spaceAfter=20
+    )
+    
+    content_style = ParagraphStyle(
+        'CustomContent',
+        parent=styles['Normal'],
+        fontSize=12,
+        leading=18,
+        spaceAfter=12
+    )
+    
+    # Build document content
+    story = []
+    
+    # Title
+    story.append(Paragraph(title, title_style))
+    
+    # Metadata
+    content_type_labels = {
+        "summary": "Résumé",
+        "translation": "Traduction",
+        "quiz": "Quiz"
+    }
+    metadata = f"Type: {content_type_labels.get(content_type, content_type)} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    if source_url:
+        metadata += f" | Source: {source_url[:50]}..."
+    story.append(Paragraph(metadata, subtitle_style))
+    
+    # Separator
+    story.append(Spacer(1, 0.2 * inch))
+    
+    # Main content - split by paragraphs
+    paragraphs = content.split('\n\n')
+    for para in paragraphs:
+        if para.strip():
+            # Handle special characters
+            safe_para = para.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            story.append(Paragraph(safe_para, content_style))
+    
+    # Build PDF
+    doc.build(story)
+    buffer.seek(0)
+    
+    return buffer
+
+
+def create_txt(title: str, content: str, content_type: str, source_url: str = None) -> BytesIO:
+    """
+    Create a TXT document from the provided content.
+    
+    Args:
+        title: Document title
+        content: Main content
+        content_type: Type of content
+        source_url: Optional source URL
+    
+    Returns:
+        BytesIO buffer containing the TXT
+    """
+    buffer = BytesIO()
+    
+    # Build text content
+    content_type_labels = {
+        "summary": "Résumé",
+        "translation": "Traduction",
+        "quiz": "Quiz"
+    }
+    
+    lines = [
+        "=" * 60,
+        title.upper(),
+        "=" * 60,
+        "",
+        f"Type: {content_type_labels.get(content_type, content_type)}",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    ]
+    
+    if source_url:
+        lines.append(f"Source: {source_url}")
+    
+    lines.extend([
+        "",
+        "-" * 60,
+        "",
+        content,
+        "",
+        "-" * 60,
+        "Generated by WikiSmart-Edu",
+        "=" * 60
+    ])
+    
+    text_content = "\n".join(lines)
+    buffer.write(text_content.encode('utf-8'))
+    buffer.seek(0)
+    
+    return buffer
+
+
+# ============================================================
+# ENDPOINTS
+# ============================================================
+
+@router.post("/pdf")
+async def export_to_pdf(
+    request: ExportRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Export content to a PDF file.
+    
+    **How it works:**
+    1. User provides title, content, and content type
+    2. We generate a formatted PDF document
+    3. The PDF is returned as a downloadable file
+    
+    **Example request:**
+    ```json
+    {
+        "title": "Intelligence Artificielle - Résumé",
+        "content": "L'intelligence artificielle est...",
+        "content_type": "summary",
+        "source_url": "https://fr.wikipedia.org/wiki/Intelligence_artificielle"
+    }
+    ```
+    """
+    logger.info(f"User {current_user.username} exporting to PDF: {request.title}")
+    
+    try:
+        # Generate PDF
+        pdf_buffer = create_pdf(
+            title=request.title,
+            content=request.content,
+            content_type=request.content_type,
+            source_url=request.source_url
+        )
+        
+        # Create filename
+        safe_title = "".join(c for c in request.title if c.isalnum() or c in (' ', '-', '_'))[:50]
+        filename = f"{safe_title}.pdf"
+        
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error exporting to PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to export PDF: {str(e)}")
+
+
+@router.post("/txt")
+async def export_to_txt(
+    request: ExportRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Export content to a TXT file.
+    
+    **How it works:**
+    1. User provides title, content, and content type
+    2. We generate a formatted text file
+    3. The TXT is returned as a downloadable file
+    """
+    logger.info(f"User {current_user.username} exporting to TXT: {request.title}")
+    
+    try:
+        # Generate TXT
+        txt_buffer = create_txt(
+            title=request.title,
+            content=request.content,
+            content_type=request.content_type,
+            source_url=request.source_url
+        )
+        
+        # Create filename
+        safe_title = "".join(c for c in request.title if c.isalnum() or c in (' ', '-', '_'))[:50]
+        filename = f"{safe_title}.txt"
+        
+        return StreamingResponse(
+            txt_buffer,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error exporting to TXT: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to export TXT: {str(e)}")

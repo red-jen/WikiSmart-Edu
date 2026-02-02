@@ -92,12 +92,26 @@ async def root():
 
 
 # Import and include routers
-from app.routers import auth
+from app.routers import auth, content, llm, articles, quiz, export, admin
 
+# Authentication endpoints
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 
-# Additional routers to be added:
-# from app.routers import articles, users, admin
-# app.include_router(articles.router, prefix="/api/articles", tags=["Articles"])
-# app.include_router(users.router, prefix="/api/users", tags=["Users"])
-# app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+# Content extraction endpoints (Wikipedia & PDF)
+app.include_router(content.router, prefix="/api/content", tags=["Content Extraction"])
+
+# LLM processing endpoints (Summary, Translation, Quiz Generation)
+app.include_router(llm.router, prefix="/api/llm", tags=["LLM Processing"])
+
+# Article history endpoints
+app.include_router(articles.router, prefix="/api/articles", tags=["Articles"])
+
+# Quiz endpoints (submit answers, history)
+app.include_router(quiz.router, prefix="/api/quiz", tags=["Quiz"])
+
+# Export endpoints (PDF, TXT)
+app.include_router(export.router, prefix="/api/export", tags=["Export"])
+
+# Admin endpoints (requires admin role)
+app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+

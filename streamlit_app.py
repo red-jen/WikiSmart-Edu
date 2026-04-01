@@ -116,22 +116,33 @@ def register_user(username: str, email: str, password: str) -> bool:
 
 def login_user(username: str, password: str) -> bool:
     """Login user and store token."""
-    data = {
-        "username": username,
-        "password": password
-    }
-    result = api_call("POST", "/api/auth/login", data=data)
+    # OAuth2 expects form data, not JSON
+    url = f"{API_BASE_URL}/api/auth/login"
     
-    if result:
-        st.session_state.token = result.get("access_token")
-        st.session_state.authenticated = True
+    try:
+        # Send as form data (x-www-form-urlencoded)
+        response = requests.post(
+            url,
+            data={"username": username, "password": password},
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
         
-        # Fetch user info
-        user_info = api_call("GET", "/api/auth/me", use_auth=True)
-        if user_info:
-            st.session_state.user = user_info
-        return True
-    return False
+        if response.status_code == 200:
+            result = response.json()
+            st.session_state.token = result.get("access_token")
+            st.session_state.authenticated = True
+            
+            # Fetch user info
+            user_info = api_call("GET", "/api/auth/me", use_auth=True)
+            if user_info:
+                st.session_state.user = user_info
+            return True
+        else:
+            st.error(f"API Error: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        st.error(f"Connection Error: {str(e)}")
+        return False
 
 
 def logout_user():
@@ -204,13 +215,20 @@ def show_main_app():
         if st.session_state.user:
             st.markdown(f"**👤 {st.session_state.user.get('username', 'User')}**")
             st.markdown(f"📧 {st.session_state.user.get('email', '')}")
+            user_role = st.session_state.user.get('role', 'user')
+        else:
+            user_role = 'user'
         
         st.divider()
         
-        # Navigation
+        # Navigation - add admin if user is admin
+        nav_options = ["🏠 Accueil", "📖 Wikipedia", "📄 PDF", "📊 Résumé", "🌍 Traduction", "❓ Quiz", "📚 Historique", "📝 Export"]
+        if user_role == "admin":
+            nav_options.append("👑 Admin")
+        
         page = st.radio(
             "Navigation",
-            ["🏠 Accueil", "📖 Wikipedia", "📄 PDF", "📊 Résumé", "🌍 Traduction", "❓ Quiz", "📝 Export"],
+            nav_options,
             label_visibility="collapsed"
         )
         
@@ -233,8 +251,12 @@ def show_main_app():
         show_translation_page()
     elif page == "❓ Quiz":
         show_quiz_page()
+    elif page == "📚 Historique":
+        show_history_page()
     elif page == "📝 Export":
         show_export_page()
+    elif page == "👑 Admin":
+        show_admin_page()
 
 
 def show_home_page():
@@ -306,17 +328,24 @@ def show_wikipedia_page():
     if st.button("📥 Extraire le contenu", type="primary"):
         if wiki_url:
             with st.spinner("Extraction en cours..."):
-                # Note: This endpoint needs to be created in the backend
-                # For now, we'll show a placeholder
-                st.info("⚠️ Cette fonctionnalité nécessite un endpoint API backend. Veuillez créer `/api/content/wikipedia` dans votre backend.")
+                # Call the real API endpoint
+                result = api_call(
+                    "POST", 
+                    "/api/content/wikipedia",
+                    data={"url": wiki_url, "language": language},
+                    use_auth=True
+                )
                 
-                # Placeholder for future implementation
-                st.session_state.article_content = {
-                    "title": "Article Wikipedia",
-                    "url": wiki_url,
-                    "language": language,
-                    "content": "Contenu extrait de l'article..."
-                }
+                if result:
+                    st.session_state.article_content = {
+                        "title": result.get("title", "Article Wikipedia"),
+                        "url": wiki_url,
+                        "language": language,
+                        "content": result.get("content", ""),
+                        "source": result.get("source", "wikipedia"),
+                        "character_count": result.get("character_count", 0)
+                    }
+                    st.success(f"✅ Article extrait: {result.get('title')}")
         else:
             st.warning("⚠️ Veuillez entrer une URL Wikipedia")
     
@@ -355,17 +384,29 @@ def show_pdf_page():
     if uploaded_file is not None:
         if st.button("📥 Extraire le texte", type="primary"):
             with st.spinner("Extraction du texte..."):
-                # Note: This endpoint needs to be created in the backend
-                st.info("⚠️ Cette fonctionnalité nécessite un endpoint API backend. Veuillez créer `/api/content/pdf` dans votre backend.")
+                # Call the real API endpoint with file upload
+                url = f"{API_BASE_URL}/api/content/pdf"
+                headers = {}
+                if st.session_state.token:
+                    headers["Authorization"] = f"Bearer {st.session_state.token}"
                 
-                # Placeholder for future implementation
-                st.session_state.article_content = {
-                    "title": uploaded_file.name,
-                    "source": "PDF",
-                    "content": f"Texte extrait du fichier {uploaded_file.name}..."
-                }
-                
-                st.success(f"✅ Texte extrait de {uploaded_file.name}")
+                try:
+                    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
+                    response = requests.post(url, files=files, headers=headers)
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        st.session_state.article_content = {
+                            "title": result.get("title", uploaded_file.name),
+                            "source": "pdf",
+                            "content": result.get("content", ""),
+                            "character_count": result.get("character_count", 0)
+                        }
+                        st.success(f"✅ Texte extrait de {uploaded_file.name}")
+                    else:
+                        st.error(f"❌ Erreur: {response.text}")
+                except Exception as e:
+                    st.error(f"❌ Erreur: {str(e)}")
 
 
 def show_summary_page():
@@ -377,6 +418,7 @@ def show_summary_page():
         return
     
     st.markdown(f"**Source:** {st.session_state.article_content.get('title', 'N/A')}")
+    st.markdown(f"**Caractères:** {st.session_state.article_content.get('character_count', len(st.session_state.article_content.get('content', '')))}")
     
     summary_type = st.radio(
         "Type de résumé",
@@ -387,22 +429,32 @@ def show_summary_page():
     if st.button("✨ Générer le résumé", type="primary"):
         summary_mode = "short" if "Court" in summary_type else "medium"
         
-        with st.spinner("Génération du résumé avec Groq..."):
-            # Note: This endpoint needs to be created in the backend
-            st.info("⚠️ Cette fonctionnalité nécessite un endpoint API backend. Veuillez créer `/api/llm/summary` dans votre backend.")
+        with st.spinner("Génération du résumé avec Groq (Llama 3.3)..."):
+            # Call the real API endpoint
+            result = api_call(
+                "POST",
+                "/api/llm/summarize",
+                data={
+                    "content": st.session_state.article_content.get("content", ""),
+                    "summary_type": summary_mode
+                },
+                use_auth=True
+            )
             
-            # Placeholder
-            st.session_state.summary = {
-                "type": summary_mode,
-                "content": f"Résumé {summary_mode} de l'article...",
-                "generated_at": datetime.now().isoformat()
-            }
+            if result:
+                st.session_state.summary = {
+                    "type": summary_mode,
+                    "content": result.get("summary", ""),
+                    "word_count": result.get("word_count", 0),
+                    "language": result.get("language", ""),
+                    "generated_at": datetime.now().isoformat()
+                }
+                st.success("✅ Résumé généré avec succès!")
     
     if st.session_state.summary:
-        st.success("✅ Résumé généré avec succès!")
-        
         st.subheader("📝 Résumé")
         st.markdown(f"**Type:** {st.session_state.summary.get('type', 'N/A').capitalize()}")
+        st.markdown(f"**Mots:** {st.session_state.summary.get('word_count', 0)}")
         
         st.text_area(
             "Contenu du résumé",
@@ -432,6 +484,7 @@ def show_translation_page():
         return
     
     st.markdown(f"**Source:** {source_title}")
+    st.markdown(f"**Caractères à traduire:** {len(content_to_translate)}")
     
     target_lang = st.selectbox(
         "Langue cible",
@@ -439,23 +492,33 @@ def show_translation_page():
     )
     
     if st.button("🌐 Traduire", type="primary"):
-        lang_code = target_lang.split(" - ")[0]
+        lang_code = target_lang.split(" - ")[0].lower()
+        lang_name = target_lang.split(" - ")[1]
         
-        with st.spinner(f"Traduction en {target_lang.split(' - ')[1]} avec Google Gemini..."):
-            # Note: This endpoint needs to be created in the backend
-            st.info("⚠️ Cette fonctionnalité nécessite un endpoint API backend. Veuillez créer `/api/llm/translate` dans votre backend.")
+        with st.spinner(f"Traduction en {lang_name} avec Google Gemini..."):
+            # Call the real API endpoint
+            result = api_call(
+                "POST",
+                "/api/llm/translate",
+                data={
+                    "content": content_to_translate,
+                    "target_language": lang_code
+                },
+                use_auth=True
+            )
             
-            # Placeholder
-            st.session_state.translation = {
-                "target_language": lang_code,
-                "content": f"Texte traduit en {lang_code}...",
-                "generated_at": datetime.now().isoformat()
-            }
+            if result:
+                st.session_state.translation = {
+                    "target_language": lang_code,
+                    "content": result.get("translated_text", ""),
+                    "source_language": result.get("source_language", ""),
+                    "generated_at": datetime.now().isoformat()
+                }
+                st.success(f"✅ Traduction en {lang_name} réussie!")
     
     if st.session_state.translation:
-        st.success(f"✅ Traduction en {st.session_state.translation.get('target_language', 'N/A')} réussie!")
-        
         st.subheader("📝 Traduction")
+        st.markdown(f"**Langue cible:** {st.session_state.translation.get('target_language', 'N/A').upper()}")
         
         st.text_area(
             "Texte traduit",
@@ -477,42 +540,48 @@ def show_quiz_page():
     
     with tab1:
         st.subheader("Générer un nouveau quiz")
+        st.markdown(f"**Source:** {st.session_state.article_content.get('title', 'N/A')}")
         
         col1, col2 = st.columns(2)
         with col1:
-            num_questions = st.number_input("Nombre de questions", min_value=3, max_value=20, value=5)
+            num_mcq = st.number_input("Questions QCM", min_value=1, max_value=10, value=3)
         with col2:
-            difficulty = st.select_slider("Difficulté", options=["Facile", "Moyen", "Difficile"])
+            num_open = st.number_input("Questions ouvertes", min_value=0, max_value=5, value=2)
         
         if st.button("🎲 Générer le quiz", type="primary"):
             with st.spinner("Génération du quiz avec Google Gemini..."):
-                # Note: This endpoint needs to be created in the backend
-                st.info("⚠️ Cette fonctionnalité nécessite un endpoint API backend. Veuillez créer `/api/llm/quiz` dans votre backend.")
+                # Call the real API endpoint
+                result = api_call(
+                    "POST",
+                    "/api/llm/quiz/generate",
+                    data={
+                        "content": st.session_state.article_content.get("content", ""),
+                        "num_mcq": num_mcq,
+                        "num_open": num_open
+                    },
+                    use_auth=True
+                )
                 
-                # Placeholder quiz
-                st.session_state.quiz = {
-                    "questions": [
-                        {
-                            "id": 1,
-                            "question": "Question 1?",
-                            "options": ["Option A", "Option B", "Option C", "Option D"],
-                            "correct_answer": 0,
-                            "user_answer": None
-                        },
-                        {
-                            "id": 2,
-                            "question": "Question 2?",
-                            "options": ["Option A", "Option B", "Option C", "Option D"],
-                            "correct_answer": 1,
+                if result:
+                    # Process API response into quiz format
+                    questions = []
+                    for idx, q in enumerate(result.get("questions", [])):
+                        question_data = {
+                            "id": idx + 1,
+                            "question": q.get("question", ""),
+                            "type": q.get("type", "mcq"),
+                            "options": q.get("options", []),
+                            "correct_answer": q.get("correct_answer", ""),
                             "user_answer": None
                         }
-                    ],
-                    "difficulty": difficulty,
-                    "num_questions": num_questions,
-                    "generated_at": datetime.now().isoformat()
-                }
-                
-                st.success("✅ Quiz généré avec succès!")
+                        questions.append(question_data)
+                    
+                    st.session_state.quiz = {
+                        "questions": questions,
+                        "total_questions": result.get("total_questions", len(questions)),
+                        "generated_at": datetime.now().isoformat()
+                    }
+                    st.success(f"✅ Quiz généré avec {len(questions)} questions!")
     
     with tab2:
         if not st.session_state.quiz:
@@ -521,40 +590,60 @@ def show_quiz_page():
             st.subheader("Répondez aux questions")
             
             questions = st.session_state.quiz.get('questions', [])
+            user_answers = {}
             
             for idx, q in enumerate(questions):
-                st.markdown(f"**Question {idx + 1}:** {q['question']}")
+                st.markdown(f"### Question {idx + 1}: {q['question']}")
                 
-                user_choice = st.radio(
-                    f"Choisissez votre réponse",
-                    q['options'],
-                    key=f"q_{idx}",
-                    label_visibility="collapsed"
-                )
-                
-                # Store user answer
-                q['user_answer'] = q['options'].index(user_choice)
+                if q['type'] == 'mcq' and q.get('options'):
+                    # Multiple choice question
+                    user_choice = st.radio(
+                        f"Choisissez votre réponse",
+                        q['options'],
+                        key=f"q_{idx}",
+                        label_visibility="collapsed"
+                    )
+                    user_answers[idx] = user_choice
+                else:
+                    # Open-ended question
+                    user_input = st.text_area(
+                        "Votre réponse",
+                        key=f"open_q_{idx}",
+                        height=100
+                    )
+                    user_answers[idx] = user_input
                 
                 st.divider()
             
             if st.button("📊 Soumettre et voir les résultats", type="primary"):
-                correct_count = sum(1 for q in questions if q['user_answer'] == q['correct_answer'])
+                correct_count = 0
                 total_questions = len(questions)
-                score = (correct_count / total_questions) * 100
                 
-                st.success(f"✅ Quiz terminé! Score: {correct_count}/{total_questions} ({score:.1f}%)")
-                
-                # Show detailed results
                 st.subheader("📋 Résultats détaillés")
+                
                 for idx, q in enumerate(questions):
-                    is_correct = q['user_answer'] == q['correct_answer']
-                    status = "✅" if is_correct else "❌"
+                    user_answer = user_answers.get(idx, "")
+                    correct_answer = q.get('correct_answer', '')
                     
-                    st.markdown(f"{status} **Question {idx + 1}:** {q['question']}")
-                    st.markdown(f"Votre réponse: {q['options'][q['user_answer']]}")
-                    if not is_correct:
-                        st.markdown(f"✓ Bonne réponse: {q['options'][q['correct_answer']]}")
+                    # For MCQ, compare directly
+                    if q['type'] == 'mcq':
+                        is_correct = user_answer == correct_answer
+                    else:
+                        # For open questions, do simple comparison (in real app, use AI to evaluate)
+                        is_correct = user_answer.lower().strip() in correct_answer.lower()
+                    
+                    if is_correct:
+                        correct_count += 1
+                        st.markdown(f"✅ **Question {idx + 1}:** {q['question']}")
+                        st.markdown(f"Votre réponse: {user_answer}")
+                    else:
+                        st.markdown(f"❌ **Question {idx + 1}:** {q['question']}")
+                        st.markdown(f"Votre réponse: {user_answer}")
+                        st.markdown(f"✓ Bonne réponse: {correct_answer}")
                     st.divider()
+                
+                score = (correct_count / total_questions) * 100 if total_questions > 0 else 0
+                st.success(f"### 🎯 Score final: {correct_count}/{total_questions} ({score:.1f}%)")
 
 
 def show_export_page():
@@ -588,7 +677,7 @@ def show_export_page():
     
     export_format = st.radio(
         "Format d'export",
-        ["PDF", "TXT", "JSON"],
+        ["PDF", "TXT"],
         horizontal=True
     )
     
@@ -601,20 +690,198 @@ def show_export_page():
     if st.button("💾 Exporter", type="primary"):
         if items_to_export:
             with st.spinner(f"Génération du fichier {export_format}..."):
-                # Note: This endpoint needs to be created in the backend
-                st.info(f"⚠️ Cette fonctionnalité nécessite un endpoint API backend. Veuillez créer `/api/export/{export_format.lower()}` dans votre backend.")
+                # Prepare content for export
+                title = st.session_state.article_content.get('title', 'WikiSmart Export') if st.session_state.article_content else 'WikiSmart Export'
                 
-                st.success(f"✅ Export {export_format} généré avec succès!")
+                content_parts = []
+                content_type = "summary"
                 
-                # Placeholder download button
-                st.download_button(
-                    label=f"📥 Télécharger ({export_format})",
-                    data="Contenu exporté...",
-                    file_name=f"wikismart_export.{export_format.lower()}",
-                    mime="application/octet-stream"
-                )
+                if "Article original" in items_to_export and st.session_state.article_content:
+                    content_parts.append("=== ARTICLE ORIGINAL ===\n")
+                    content_parts.append(st.session_state.article_content.get('content', ''))
+                    content_parts.append("\n\n")
+                
+                if "Résumé" in items_to_export and st.session_state.summary:
+                    content_parts.append("=== RÉSUMÉ ===\n")
+                    content_parts.append(st.session_state.summary.get('content', ''))
+                    content_parts.append("\n\n")
+                    content_type = "summary"
+                
+                if "Traduction" in items_to_export and st.session_state.translation:
+                    content_parts.append("=== TRADUCTION ===\n")
+                    content_parts.append(st.session_state.translation.get('content', ''))
+                    content_parts.append("\n\n")
+                    content_type = "translation"
+                
+                if "Quiz" in items_to_export and st.session_state.quiz:
+                    content_parts.append("=== QUIZ ===\n")
+                    for q in st.session_state.quiz.get('questions', []):
+                        content_parts.append(f"Q: {q['question']}\n")
+                        if q.get('options'):
+                            for opt in q['options']:
+                                content_parts.append(f"  - {opt}\n")
+                        content_parts.append(f"Réponse: {q.get('correct_answer', 'N/A')}\n\n")
+                    content_type = "quiz"
+                
+                full_content = "".join(content_parts)
+                
+                # Call the real API endpoint
+                endpoint = "/api/export/pdf" if export_format == "PDF" else "/api/export/txt"
+                
+                url = f"{API_BASE_URL}{endpoint}"
+                headers = {"Content-Type": "application/json"}
+                if st.session_state.token:
+                    headers["Authorization"] = f"Bearer {st.session_state.token}"
+                
+                try:
+                    response = requests.post(
+                        url,
+                        json={
+                            "title": title,
+                            "content": full_content,
+                            "content_type": content_type,
+                            "source_url": st.session_state.article_content.get('url', '') if st.session_state.article_content else ''
+                        },
+                        headers=headers
+                    )
+                    
+                    if response.status_code == 200:
+                        st.success(f"✅ Export {export_format} généré avec succès!")
+                        
+                        # Download button with actual content
+                        file_ext = export_format.lower()
+                        mime_type = "application/pdf" if export_format == "PDF" else "text/plain"
+                        
+                        st.download_button(
+                            label=f"📥 Télécharger ({export_format})",
+                            data=response.content,
+                            file_name=f"wikismart_export.{file_ext}",
+                            mime=mime_type
+                        )
+                    else:
+                        st.error(f"❌ Erreur d'export: {response.text}")
+                except Exception as e:
+                    st.error(f"❌ Erreur: {str(e)}")
         else:
             st.warning("⚠️ Veuillez sélectionner au moins un élément à exporter")
+
+
+def show_history_page():
+    """Display article history page."""
+    st.title("📚 Historique des Articles")
+    
+    st.markdown("""
+    Retrouvez ici tous vos articles, résumés, traductions et quiz précédents.
+    """)
+    
+    # Fetch article history from API
+    with st.spinner("Chargement de l'historique..."):
+        result = api_call("GET", "/api/articles/", use_auth=True)
+    
+    if result:
+        articles = result.get('articles', [])
+        total = result.get('total', 0)
+        
+        st.markdown(f"**Total:** {total} article(s)")
+        st.divider()
+        
+        if articles:
+            for article in articles:
+                with st.expander(f"📄 {article.get('title', 'Sans titre')} - {article.get('action', '').capitalize()}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown(f"**Action:** {article.get('action', 'N/A')}")
+                        st.markdown(f"**Langue:** {article.get('language', 'N/A')}")
+                    with col2:
+                        st.markdown(f"**Date:** {article.get('created_at', 'N/A')[:10]}")
+                        if article.get('url'):
+                            st.markdown(f"**URL:** [{article.get('url')[:30]}...]({article.get('url')})")
+                    
+                    st.markdown("---")
+                    st.markdown("**Contenu:**")
+                    content = article.get('content', '')
+                    st.text_area("", content[:1000] + ("..." if len(content) > 1000 else ""), height=150, disabled=True, key=f"art_{article.get('id')}")
+        else:
+            st.info("ℹ️ Aucun article dans l'historique. Commencez par extraire un article Wikipedia ou PDF!")
+    else:
+        st.info("ℹ️ Aucun historique disponible ou erreur de connexion.")
+
+
+def show_admin_page():
+    """Display admin dashboard page."""
+    st.title("👑 Tableau de Bord Admin")
+    
+    # Verify admin status
+    if st.session_state.user and st.session_state.user.get('role') != 'admin':
+        st.error("❌ Accès refusé. Privilèges admin requis.")
+        return
+    
+    tab1, tab2 = st.tabs(["📊 Statistiques", "👥 Utilisateurs"])
+    
+    with tab1:
+        st.subheader("📊 Statistiques Globales")
+        
+        with st.spinner("Chargement des statistiques..."):
+            result = api_call("GET", "/api/admin/stats", use_auth=True)
+        
+        if result:
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("👥 Utilisateurs", result.get('total_users', 0))
+            with col2:
+                st.metric("📄 Articles", result.get('total_articles', 0))
+            with col3:
+                st.metric("📊 Résumés", result.get('total_summaries', 0))
+            with col4:
+                st.metric("🌍 Traductions", result.get('total_translations', 0))
+            
+            st.divider()
+            
+            col5, col6, col7 = st.columns(3)
+            with col5:
+                st.metric("❓ Quiz Générés", result.get('total_quizzes_generated', 0))
+            with col6:
+                st.metric("✅ Quiz Tentatives", result.get('total_quiz_attempts', 0))
+            with col7:
+                avg_score = result.get('average_quiz_score', 0)
+                st.metric("📈 Score Moyen", f"{avg_score:.1f}%")
+        else:
+            st.error("❌ Erreur lors du chargement des statistiques")
+    
+    with tab2:
+        st.subheader("👥 Gestion des Utilisateurs")
+        
+        with st.spinner("Chargement des utilisateurs..."):
+            result = api_call("GET", "/api/admin/users", use_auth=True)
+        
+        if result:
+            users = result.get('users', [])
+            
+            if users:
+                # Create a table
+                for user in users:
+                    with st.container():
+                        col1, col2, col3, col4, col5 = st.columns([2, 3, 1, 1, 1])
+                        
+                        with col1:
+                            st.markdown(f"**{user.get('username', 'N/A')}**")
+                        with col2:
+                            st.markdown(f"📧 {user.get('email', 'N/A')}")
+                        with col3:
+                            role = user.get('role', 'user')
+                            role_badge = "👑" if role == "admin" else "👤"
+                            st.markdown(f"{role_badge} {role}")
+                        with col4:
+                            st.markdown(f"📄 {user.get('article_count', 0)}")
+                        with col5:
+                            st.markdown(f"❓ {user.get('quiz_attempts', 0)}")
+                        
+                        st.divider()
+            else:
+                st.info("ℹ️ Aucun utilisateur trouvé")
+        else:
+            st.error("❌ Erreur lors du chargement des utilisateurs")
 
 
 # Main application logic

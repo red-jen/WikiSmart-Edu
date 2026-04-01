@@ -235,12 +235,24 @@ async def generate_quiz(
         )
         
         # Parse the quiz data into our response format
+        # LLMService returns: {"mcq_questions": [...], "open_questions": [...]}
         questions = []
-        for q in quiz_data.get("questions", []):
+        
+        # Process MCQ questions
+        for q in quiz_data.get("mcq_questions", []):
             questions.append(QuizQuestion(
                 question=q["question"],
-                type=q["type"],
-                options=q.get("options"),
+                type="mcq",
+                options=q.get("options", []),
+                correct_answer=q["correct_answer"]
+            ))
+        
+        # Process open-ended questions
+        for q in quiz_data.get("open_questions", []):
+            questions.append(QuizQuestion(
+                question=q["question"],
+                type="open",
+                options=None,  # Open questions don't have options
                 correct_answer=q["correct_answer"]
             ))
         
